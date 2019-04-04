@@ -556,7 +556,7 @@ class Bot extends Agent {
     };
 
     _getClock () {
-        _getClock(this);
+        getClock(this);
     };
 }
 
