@@ -6,15 +6,20 @@
 'use strict';
 
 const Agent = require('node-agent-sdk').Agent;
-const Winston = require('winston');
 
-const log = new Winston.Logger({
-    name: 'bot_log',
-    transports: [new Winston.transports.Console({
-        timestamp: true,
-        colorize: true,
-        level: process.env.loglevel || 'warn'
-    })]
+const winston = require('winston');
+const logFormat = winston.format.combine(
+    winston.format.label({ label:'bot.js' }),
+    winston.format.json(),
+    winston.format.timestamp(),
+    winston.format.colorize(),
+    winston.format.printf(info => { return `${info.timestamp} [${info.label}] ${info.level}: ${info.message}` })
+);
+const log = winston.createLogger({
+    format: logFormat,
+    transports: [
+        new winston.transports.Console({ timestamp: true, colorize: true, level: process.env.loglevel || 'warn' })
+    ]
 });
 
 const botConfig = {
@@ -38,37 +43,46 @@ class Bot extends Agent {
      * @param {Object} config - Config object for agent as defined at https://github.com/LivePersonInc/node-agent-sdk#agent-class
      * @param {String} [initialState=ONLINE] - Bot's initial state. Acceptable values are 'ONLINE', 'OCCUPIED', 'AWAY'
      * @param {Boolean} [subscribeAllConversations=false] - If false, subscribe only to bot's conversations. If true, subscribe to all conversations
-     * @param {Number} [clockPingInterval=300000] - Keep-alive interval in ms
+     * @param {Boolean} [logfile=false] - If true, log to a file called bot_log.log, log level is 'info' unless otherwise specified in process.env.loglevel
      */
-    constructor(config, initialState = 'ONLINE', subscribeAllConversations = false) {
+    constructor(config, initialState = 'ONLINE', subscribeAllConversations = false, logfile = false, subscribeToMessagingEvents = true) {
+        if (logfile) log.add(new winston.transports.File({ filename: 'bot_log.log', level: process.env.loglevel || 'info' }));
+
+        if (!config) {
+            log.warn(`No config provided for account: ${process.env.LP_ACCOUNT}, user: ${process.env.LP_USER}`);
+        }
+
         // Set agent config from environment or file (env takes precedence)
         const _config = {
-            accountId: process.env.LP_ACCOUNTID || process.env.LP_ACCOUNT || config.accountId,
-            username: process.env.LP_USERNAME || process.env.LP_USER || config.username,
-            password: process.env.LP_PASSWORD || config.password,
-            token: process.env.LP_TOKEN || config.token,
-            userId: process.env.LP_USERID || config.userId,
-            assertion: process.env.LP_ASSERTION || config.assertion,
-            appKey: process.env.LP_APPKEY || config.appKey,
-            secret: process.env.LP_SECRET || config.secret,
-            accessToken: process.env.LP_ACCESSTOKEN || config.accessToken,
-            accessTokenSecret: process.env.LP_ACCESSTOKENSECRET || config.accessTokenSecret,
-            csdsDomain: process.env.LP_CSDSDOMAIN || config.csdsDomain,
-            requestTimeout: process.env.LP_REQUESTTIMEOUT || config.requestTimeout,
-            errorCheckInterval: process.env.LP_ERRORCHECKINTERVAL || config.errorCheckInterval,
-            apiVersion: process.env.LP_APIVERSION || config.apiVersion
+            accountId: process.env.LP_ACCOUNTID || process.env.LP_ACCOUNT || config && config.accountId,
+            username: process.env.LP_USERNAME || process.env.LP_USER || config && config.username,
+            password: process.env.LP_PASSWORD || process.env.PASS || config && config.password,
+            token: process.env.LP_TOKEN || config && config.token,
+            userId: process.env.LP_USERID || config && config.userId,
+            assertion: process.env.LP_ASSERTION || config && config.assertion,
+            appKey: process.env.LP_APPKEY || config && config.appKey,
+            secret: process.env.LP_SECRET || config && config.secret,
+            accessToken: process.env.LP_ACCESSTOKEN || config && config.accessToken,
+            accessTokenSecret: process.env.LP_ACCESSTOKENSECRET || config && config.accessTokenSecret,
+            csdsDomain: process.env.LP_CSDSDOMAIN || config && config.csdsDomain,
+            requestTimeout: process.env.LP_REQUESTTIMEOUT || config && config.requestTimeout,
+            errorCheckInterval: process.env.LP_ERRORCHECKINTERVAL || config && config.errorCheckInterval,
+            apiVersion: process.env.LP_APIVERSION || config && config.apiVersion,
+            agent: config && config.agent
         };
         Object.keys(_config).forEach(key => _config[key] === undefined && delete _config[key]);
         super(_config);
         this.config = _config;
         this.initialState = initialState;
         this.subscribeAllConversations = subscribeAllConversations;
+        this.subscribeToMessagingEvents = subscribeToMessagingEvents;
         this.init();
     }
 
     static get const() {
         return {
             CONTENT_NOTIFICATION: 'Bot.Event.Content',
+            SC_ACTION_NOTIFICATION: 'Bot.Event.Metadata',
             CONVERSATION_NOTIFICATION: 'Bot.Event.Conversation',
             ROUTING_NOTIFICATION: 'Bot.Event.Routing',
             AGENT_STATE_NOTIFICATION: 'Bot.Event.AgentState',
@@ -92,7 +106,7 @@ class Bot extends Agent {
         notifications, and subscribe to routing tasks */
         this.on('connected', (message) => {
             clearTimeout(this._retryConnection);
-            log.info(`[bot.js] connected: ${JSON.stringify(message)}`);
+            log.info(`connected: ${JSON.stringify(message)}`);
             this.emit(Bot.const.CONNECTED, message);
 
             // Get server clock at a regular interval in order to keep the connection alive
@@ -103,75 +117,80 @@ class Bot extends Agent {
             // Subscribe to Agent State notifications
             this.subscribeAgentsState({}, (e, resp) => {
                 if (e) {
-                    log.error(`[bot.js] subscribeAgentState: ${JSON.stringify(e)}`)
+                    log.error(`subscribeAgentState: ${JSON.stringify(e)}`)
                 }
                 else {
-                    log.info(`[bot.js] subscribeAgentsState: ${JSON.stringify(resp)}`)
+                    log.info(`subscribeAgentsState: ${JSON.stringify(resp)}`)
                 }
             });
 
             // Set initial agent state
-            this.setAgentState({availability: this.initialState}, (e, resp) => {
-                if (e) {
-                    log.error(`[bot.js] setAgentState: ${JSON.stringify(e)}`)
-                }
-                else {
-                    log.info(`[bot.js] setAgentState: ${JSON.stringify(resp)}`)
-                }
-            });
+            this.setBotState(this.initialState);
 
             // Subscribe to Conversation Notifications
             let convSubParams = {'convState': ['OPEN']};
             if (!this.subscribeAllConversations) convSubParams.agentIds = [this.agentId];
+            log.warn(JSON.stringify(convSubParams));
             this.subscribeExConversations(convSubParams, (e, resp) => {
                 if (e) {
-                    log.error(`[bot.js] subscribeExConversations: ${JSON.stringify(e)}`)
+                    log.error(`subscribeExConversations: ${JSON.stringify(e)}`)
                 }
                 else {
-                    log.info(`[bot.js] subscribeExConversations: ${JSON.stringify(resp)}`)
+                    log.info(`subscribeExConversations: ${JSON.stringify(resp)}`)
                 }
             });
 
             // Subscribe to Routing Task notifications
             this.subscribeRoutingTasks({}, (e, resp) => {
                 if (e) {
-                    log.error(`[bot.js] subscribeRoutingTasks: ${JSON.stringify(e)}`)
+                    log.error(`subscribeRoutingTasks: ${JSON.stringify(e)}`)
                 }
                 else {
-                    log.info(`[bot.js] subscribeRoutingTasks: ${JSON.stringify(resp)}`)
+                    log.info(`subscribeRoutingTasks: ${JSON.stringify(resp)}`)
                 }
             });
 
             // Log my agentId
-            log.info(`[bot.js] agentId: ${this.agentId}`);
+            log.info(`agentId: ${this.agentId}`);
         });
 
         // Process routing tasks
         // Log them and emit an event
         this.on('routing.RoutingTaskNotification', body => {
-            log.info(`[bot.js] routing.RoutingTaskNotification: ${JSON.stringify(body)}`);
+            log.info(`routing.RoutingTaskNotification: ${JSON.stringify(body)}`);
             body.changes.forEach((change, index) => {
-                log.silly(`[bot.js] routing.RoutingTaskNotification change ${index}: ${JSON.stringify(change)}`);
+                log.silly(`routing.RoutingTaskNotification change ${index}: ${JSON.stringify(change)}`);
             });
             this.emit(Bot.const.ROUTING_NOTIFICATION, body);
         });
 
         // Process agent state notifications
-        // Log them and emit an event
+        // Log them, update 'state' attribute, and emit an event
         this.on('routing.AgentStateNotification', body => {
-            log.info(`[bot.js] routing.AgentStateNotification: ${JSON.stringify(body)}`);
+            // logs
+            log.info(`routing.AgentStateNotification: ${JSON.stringify(body)}`);
             body.changes.forEach((change, index) => {
-                log.silly(`[bot.js] routing.AgentStateNotification change ${index}: ${JSON.stringify(change)}`);
+                log.silly(`routing.AgentStateNotification change ${index}: ${JSON.stringify(change)}`);
             });
+
+            // set 'state' to the last state received for the MESSAGING channel
+            let lastState = body.changes.reverse().find((change) => {
+                return change.result && change.result.channels && change.result.channels.find(channel => {
+                    return channel === 'MESSAGING'
+                })
+            });
+            this.state = (lastState && lastState.result.availability) || this.state;
+
+            // emit event
             this.emit(Bot.const.AGENT_STATE_NOTIFICATION, body);
         });
 
         // Process changes in the list of my open conversations
         // Log them and emit an event
         this.on('cqm.ExConversationChangeNotification', body => {
-            log.info(`[bot.js] cqm.ExConversationChangeNotification: ${JSON.stringify(body)}`);
+            log.debug(`cqm.ExConversationChangeNotification: ${JSON.stringify(body)}`);
             body.changes.forEach((change, index) => {
-                log.silly(`[bot.js] cqm.ExConversationChangeNotification change ${index}: ${(JSON.stringify(change.result.event) || '[no event]')} | ${JSON.stringify(change)}`);
+                log.silly(`cqm.ExConversationChangeNotification change ${index}: ${(JSON.stringify(change.result.event) || '[no event]')} | ${JSON.stringify(change)}`);
 
                 // When conversations are added or changed the event type will be 'UPSERT'
                 if (change.type === 'UPSERT') {
@@ -182,20 +201,25 @@ class Bot extends Agent {
 
                         // Add it to myConversations
                         this._addToMyConversations(change.result.convId);
-                        log.silly(`[bot.js] ${change.result.convId} added to myConversations: ${JSON.stringify(this.myConversations)}`);
+                        log.silly(`${change.result.convId} added to myConversations: ${JSON.stringify(this.myConversations)}`);
 
                         // Get the consumer profile
-                        this.myConversations[change.result.convId].consumerProfile = this.getConsumerProfile(change.result.convId, change.result.conversationDetails);
+                        this.getConsumerProfilePromise(this.getParticipantId(change.result.conversationDetails, 'CONSUMER'))
+                            .then(profile => {
+                                this.myConversations[change.result.convId].consumerProfile = profile;
+                            }).catch(e => {});
 
                         // Subscribe to messagingEvents
-                        this.subscribeMessagingEvents({dialogId: change.result.convId}, (e) => {
-                            if (e) {
-                                log.error(`[bot.js] subscribeMessagingEvents: ${JSON.stringify(e)}`)
-                            }
-                            else {
-                                log.info('[bot.js] subscribeMessagingEvents: success')
-                            }
-                        });
+                        if (this.subscribeToMessagingEvents) {
+                            this.subscribeMessagingEvents({dialogId: change.result.convId}, (e) => {
+                                if (e) {
+                                    log.error(`subscribeMessagingEvents: ${JSON.stringify(e)}`)
+                                }
+                                else {
+                                    log.info('subscribeMessagingEvents: success')
+                                }
+                            });
+                        }
                     }
 
                     // Update this conversation's details in my list
@@ -205,7 +229,7 @@ class Bot extends Agent {
                 } else if (change.type === 'DELETE') {
                     // Remove the conversation from myConversations
                     delete this.myConversations[change.result.convId];
-                    log.silly(`[bot.js] ${change.result.convId} removed from myConversations: ${JSON.stringify(this.myConversations)}`);
+                    log.silly(`${change.result.convId} removed from myConversations: ${JSON.stringify(this.myConversations)}`);
                 }
             });
 
@@ -216,19 +240,13 @@ class Bot extends Agent {
         // Log them, mark the message as read if relevant, and emit an event
         this.on('ms.MessagingEventNotification', body => {
 
-            // log these notifications at info level (except ChatStateEvents, which are silly)
-            if (!body.changes.find(change => {
-                    return change.event.type === 'ChatStateEvent'
-                })) {
-                log.info(`[bot.js] ms.MessagingEventNotification: ${JSON.stringify(body)}`);
-            } else {
-                log.silly(`[bot.js] ms.MessagingEventNotification: ${JSON.stringify(body)}`);
-            }
+            // log these notifications at debug level
+            log.debug(`ms.MessagingEventNotification: ${JSON.stringify(body)}`);
 
             // Create a list of messages to handle
             const respond = {};
             body.changes.forEach(change => {
-                log.silly(`[bot.js] ms.MessagingEventNotification: ${JSON.stringify(change.event)} | ${JSON.stringify(change)}`);
+                log.silly(`ms.MessagingEventNotification: ${JSON.stringify(change.event)} | ${JSON.stringify(change)}`);
 
                 if (this._isInMyConversations(change.dialogId)) { // This check is necessary because of the subscription bug
                     // add to respond list all content events not by me
@@ -240,11 +258,27 @@ class Bot extends Agent {
                             originatorMetadata: change.originatorMetadata
                         };
                     }
-                    // remove from respond list all the messages that were already read
-                    if (change.event.type === 'AcceptStatusEvent' && change.originatorId === this.agentId) {
-                        change.event.sequenceList.forEach(seq => {
-                            delete respond[`${body.dialogId}-${seq}`];
-                        });
+                    // handle AcceptStatusEvents
+                    if (change.event.type === 'AcceptStatusEvent') {
+                        switch (change.event.status) {
+                            // remove from respond list all the messages that were already read by me
+                            case 'ACCEPT':
+                                if (change.originatorId === this.agentId) {
+                                    change.event.sequenceList.forEach(seq => {
+                                        delete respond[`${body.dialogId}-${seq}`];
+                                    });
+                                }
+                                break;
+                            // emit metadata events
+                            case 'ACTION':
+                                this.emit(Bot.const.SC_ACTION_NOTIFICATION, {
+                                    dialogId: change.dialogId,
+                                    sequence: change.sequence,
+                                    metadata: change.metadata,
+                                    event: change.event,
+                                    originatorMetadata: change.originatorMetadata,
+                                })
+                        }
                     }
                 }
             });
@@ -271,37 +305,56 @@ class Bot extends Agent {
         ];
         this.on('notification', msg => {
             if (!handledMessageTypes.includes(msg.type)) {
-                log.error(`[bot.js] Got an unhandled message: ${msg.type} ${JSON.stringify(msg)}`);
+                log.error(`Got an unhandled message: ${msg.type} ${JSON.stringify(msg)}`);
             }
         });
 
         // Handle errors
         this.on('error', err => {
-            log.error(`[bot.js] ${JSON.stringify(err)}`);
+            log.error(`generic: ${err} ${JSON.stringify(err)}`);
             this.emit(Bot.const.ERROR, err);
         });
 
         // Handle socket closed
         this.on('closed', data => {
             clearInterval(this._pingClock);
-            log.warn(`[bot.js] socket closed: ${JSON.stringify(data)}`);
+            log.warn(`socket closed: ${JSON.stringify(data)}`);
             this._reconnect();
+        });
+    }
+
+    /**
+     * Set the bot's state
+     *
+     * @param {String} newState - Acceptable values are 'ONLINE', 'OCCUPIED', 'AWAY'
+     */
+    setBotState (newState) {
+        this.setAgentState({availability: newState}, (e, resp) => {
+            if (e) {
+                log.error(`setAgentState: ${JSON.stringify(e)}`)
+            }
+            else {
+                log.info(`setAgentState: ${JSON.stringify(resp)}`)
+            }
         });
     }
 
     /**
      * Get a the consumer's userProfile from a conversation
      *
-     * @param {String} conversationId
-     * @param {Object} conversationDetails
+     * @param {String} consumerId
      */
-    getConsumerProfile (conversationId, conversationDetails) {
-        const consumerId = conversationDetails.participants.filter(p => p.role === 'CONSUMER')[0].id;
-        this.getUserProfile(consumerId, (e, resp) => {
-            if (e) log.error(`[bot.js] getConsumerProfile: ${JSON.stringify(e)}`);
-            else {
-                log.info(`[bot.js] getConsumerProfile: conversation ${conversationId} consumerProfile ${JSON.stringify(resp)}`);
-            }
+    getConsumerProfilePromise (consumerId) {
+        return new Promise((resolve, reject) => {
+            this.getUserProfile(consumerId, (e, resp) => {
+                if (e) {
+                    log.error(`getConsumerProfilePromise: ${JSON.stringify(e)}`);
+                    reject(e);
+                } else {
+                    log.info(`getConsumerProfilePromise: consumer ${consumerId} consumerProfile ${JSON.stringify(resp)}`);
+                    resolve(resp);
+                }
+            });
         });
     };
 
@@ -321,8 +374,8 @@ class Bot extends Agent {
                             'ringId': ring.ringId,
                             'ringState': 'ACCEPTED'
                         }, (e, resp) => {
-                            if (e) { log.error(`[bot.js] acceptWaitingConversations ${JSON.stringify(e)}`) }
-                            else { log.info(`[bot.js] acceptWaitingConversations: Joined conversation ${JSON.stringify(change.result.conversationId)}, ${JSON.stringify(resp)}`) }
+                            if (e) { log.error(`acceptWaitingConversations ${JSON.stringify(e)}`) }
+                            else { log.info(`acceptWaitingConversations: Joined conversation ${JSON.stringify(change.result.conversationId)}, ${JSON.stringify(resp)}`) }
                         });
                     }
                 });
@@ -347,9 +400,9 @@ class Bot extends Agent {
                 'role': role
             }]
         }, (e, resp) => {
-            if (e) { log.error(`[bot.js] joinConversation ${JSON.stringify(e)}`) }
+            if (e) { log.error(`joinConversation: ${e.message}`) }
             else {
-                log.info(`[bot.js] joinConversation: Joined conversation ${JSON.stringify(conversationId)}, ${JSON.stringify(resp)}`);
+                log.info(`joinConversation: Joined conversation ${JSON.stringify(conversationId)}, ${JSON.stringify(resp)}`);
                 if (announce && role !== 'READER') {
                     this.publishEvent({
                         dialogId: conversationId,
@@ -369,9 +422,21 @@ class Bot extends Agent {
      *
      * @param {String} conversationId
      * @param {String} message
+     * @param {String} [reason] - (Metadata) Reason for this message. Visible in Messaging Interactions API.
+     * @param {String|String[]} [topic] - (Metadata) Topic(s) to show in LEUI's Bot Escalation Summary
      */
-    sendText (conversationId, message) {
-        log.silly(`[bot.js] sending text ${message} to conversation ${conversationId}`);
+    sendText (conversationId, message, reason, topic) {
+        log.silly(`sending text ${message} to conversation ${conversationId}`);
+        let metadata = [{
+            type: 'ActionReason',
+            reason: reason || 'reason not specified',
+            reasonId: '3'
+        }];
+        if (reason && (topic = reason)) metadata.push({
+            type: "BotResponse",
+            externalConversationId: conversationId,
+            businessCases: typeof topic === 'string' ? [topic] : topic
+        });
         this.publishEvent({
             dialogId: conversationId,
             event: {
@@ -379,9 +444,9 @@ class Bot extends Agent {
                 contentType: 'text/plain',
                 message: message.toString()
             }
-        }, (e, r) => {
-            if (e) { log.error(`[bot.js] sendText ${message} ${JSON.stringify(e)}`) }
-            else { log.silly(`[bot.js] sendText successful: ${JSON.stringify(r)}`)}
+        }, null, metadata, (e, r) => {
+            if (e) { log.error(`sendText ${message} ${JSON.stringify(e)}`) }
+            else { log.silly(`sendText successful: ${JSON.stringify(r)}`)}
         });
     };
 
@@ -394,16 +459,19 @@ class Bot extends Agent {
      * @param {Object} card.content - JSON Object validated at https://livepersoninc.github.io/json-pollock/editor/
      */
     sendRichContent (conversationId, card) {
-        log.silly(`[bot.js] sending structured content card ${card.id} to conversation ${conversationId}`);
+        log.silly(`sending structured content card ${card.id} to conversation ${conversationId}`);
         this.publishEvent({
             dialogId: conversationId,
             event: {
                 type: 'RichContentEvent',
                 content: card.content
             }
-        }, null, [{type: 'ExternalId', id: card.id}], (e, r) => {
-            if (e) { log.error(`[bot.js] sendRichContent card ${card.id} ${JSON.stringify(e)} ${JSON.stringify(card.content)}`) }
-            else { log.silly(`[bot.js] sendRichContent successful: ${JSON.stringify(r)}`)}
+        }, null, [
+            { type: 'ExternalId', id: card.id },
+            { type: 'BotResponse', externalConversationId: conversationId, businessCases: ['content'] }
+        ], (e, r) => {
+            if (e) { log.error(`sendRichContent card ${card.id} ${JSON.stringify(e)} ${JSON.stringify(card.content)}`) }
+            else { log.silly(`sendRichContent successful: ${JSON.stringify(r)}`)}
         });
     };
 
@@ -418,8 +486,8 @@ class Bot extends Agent {
             dialogId: conversationId,
             event: {type: 'AcceptStatusEvent', status: 'READ', sequenceList: sequenceArray}
         }, (e) => {
-            if (e) { log.error(`[bot.js] markAsRead ${JSON.stringify(e)}`) }
-            else { log.silly('[bot.js] markAsRead successful')}
+            if (e) { log.error(`markAsRead ${JSON.stringify(e)}`) }
+            else { log.silly('markAsRead successful')}
         });
     };
 
@@ -430,7 +498,7 @@ class Bot extends Agent {
      * @param {String} targetSkillId
      */
     transferConversation (conversationId, targetSkillId) {
-        log.info(`[bot.js] transferring conversation ${conversationId} to skill ${targetSkillId}`);
+        log.info(`transferring conversation ${conversationId} to skill ${targetSkillId}`);
         this.updateConversationField({
             conversationId: conversationId,
             conversationField: [
@@ -445,9 +513,37 @@ class Bot extends Agent {
                     skill: targetSkillId
                 }
             ]
-        }, (e, r) => {
-            if (e) { log.error(`[bot.js] transferConversation ${JSON.stringify(e)}`) }
-            else { log.silly(`[bot.js] transferConversation successful ${JSON.stringify(r)}`)}
+        }, null, [
+            {
+                type: 'ActionReason',
+                reason: 'escalated_by_bot', // The reason for escalation, can be other reason
+                reasonId: '3'
+            },
+            {
+                type: 'EscalationSummary',   // This is used for the escalation widget in the agent workspace
+                escalationCause: 'escalated_by_bot', // The reason for escalation, can be other reason
+                businessCases: [                      //all identified capabilities during the conversation
+                    {
+                        id: 'Help-Greetings',
+                        time: 9
+                    },
+                    {
+                        id: 'Payment-Bank_Information',
+                        time: 13
+                    }
+                ],
+                conversationDuration: 22,   //conversation duration up to the escalation
+                escalatedDuringBusinessCase: 'Payment-Bank_Information' //the capability that led to escalation
+            },{
+                type: "BotResponse",
+                externalConversationId: conversationId,
+                businessCases: [
+                    "Help-a"
+                ]
+            }
+        ],(e, r) => {
+            if (e) { log.error(`transferConversation ${JSON.stringify(e)}`) }
+            else { log.silly(`transferConversation successful ${JSON.stringify(r)}`)}
         });
     };
 
@@ -458,7 +554,7 @@ class Bot extends Agent {
      * @param {String} role
      */
     removeParticipant (conversationId, role) {
-        log.info(`[bot.js] leaving conversation ${conversationId}`);
+        log.info(`leaving conversation ${conversationId}`);
         this.updateConversationField({
             conversationId: conversationId,
             conversationField: [
@@ -469,30 +565,77 @@ class Bot extends Agent {
                 }
             ]
         }, (e) => {
-            if (e) { log.error(`[bot.js] removeParticipant ${JSON.stringify(e)}`) }
-            else { log.silly('[bot.js] removeParticipant successful') }
+            if (e) { log.error(`removeParticipant ${JSON.stringify(e)}`) }
+            else { log.silly('removeParticipant successful') }
         });
     };
 
     /**
-     * Close conversation
+     * Take over the conversation
      *
      * @param {String} conversationId
+     * @param {String} assignedAgent
      */
-    closeConversation (conversationId) {
+    takeoverConversation (conversationId, assignedAgent) {
+        log.info(`takeoverConversation conversation ${conversationId}`);
+        log.silly(`takeoverConversation participants before: ${JSON.stringify(this.myConversations[conversationId].conversationDetails.participants)}`);
+        this.updateConversationField({
+            conversationId: conversationId,
+            conversationField: [
+                {
+                    field: "ParticipantsChange",
+                    type: "REMOVE",
+                    role: "ASSIGNED_AGENT",
+                    userId: assignedAgent
+                },
+                {
+                    field: "ParticipantsChange",
+                    type: "UPDATE",
+                    role: "ASSIGNED_AGENT"
+                }
+            ]
+        }, (a, b) => {
+            log.warn(a,b);
+        })
+    }
+
+    /**
+     * Close conversation
+     *
+     * @param {String} dialogId
+     * @param {String} [conversationId=dialogId]
+     */
+    closeConversation (dialogId, conversationId = dialogId) {
         this.updateConversationField({
             'conversationId': conversationId,
             'conversationField': [
                 {
-                    'field': 'ConversationStateField',
-                    'conversationState': 'CLOSE'
+                    'field': 'DialogChange',
+                    'type': 'UPDATE',
+                    'dialog': {
+                        'dialogId': dialogId,
+                        'state': 'CLOSE'
+                    }
                 }
             ]
-        }, (e) => {
-            if (e) { log.error(`[bot.js] closeConversation ${JSON.stringify(e)}`) }
-            else { log.silly('[bot.js] closeConversation successful') }
+        }, (e, c) => {
+            if (e) {
+                log.error(`closeConversation: ${e.code} ${e.message}`)
+            }
+            else { log.info(`closeConversation successful ${c}`) }
         });
     };
+
+    /**
+     *  Get assigned agent
+     *
+     * @param conversationId
+     * @returns String - a pid
+     */
+    getAssignedAgent (conversationId) {
+        let participant = this.myConversations[conversationId].conversationDetails.participants.filter(p => p.role === 'ASSIGNED_AGENT')[0];
+        return participant && participant.id
+    }
 
     /**
      * Is a specific PID (the bot user by default) a participant in a specific conversation, and if so with what role?
@@ -507,13 +650,16 @@ class Bot extends Agent {
         return participant && participant.role;
     };
 
+    getParticipantId (conversationDetails, role) {
+        let participant = conversationDetails.participants.filter(p => p.role === role)[0];
+        return participant && participant.id;
+    }
+
     /**
      * Is this conversation in the "my conversations" list?
      *
      * @param {String} conversationId
-     *
      * @returns {Boolean}
-     *
      * @private
      */
     _isInMyConversations (conversationId) {
@@ -558,19 +704,21 @@ class Bot extends Agent {
     };
 
     /**
-     * Reconnect, then try again after the specified delay (increasing exponentially) if attempt <
+     * Attempt to reconnect after the specified delay, then keep trying at an exponentially
+     * increasing interval botConfig.reconnectAttempts times.
      *
      * @param {Number} delay
      * @param {Number} attempt
      * @private
      */
     _reconnect (delay = botConfig.reconnectInterval, attempt = 1) {
-        let _this = this;
-        log.warn(`[bot.js] reconnecting in ${Math.round(delay)}s (attempt ${attempt} of ${botConfig.reconnectAttempts})`);
+        clearTimeout(this._retryConnection);
+        let bot = this;
+        log.warn(`reconnecting in ${Math.round(delay)}s (attempt ${attempt} of ${botConfig.reconnectAttempts})`);
         this._retryConnection = setTimeout(() => {
-            _this.reconnect();
-            if (++attempt <= botConfig.reconnectAttempts) { _this._reconnect(delay * botConfig.reconnectRatio, attempt) }
-            else {log.error`[bot.js] failed to reconnect after ${botConfig.reconnectAttempts} attempts`}
+            bot.reconnect();
+            if (++attempt <= botConfig.reconnectAttempts) { bot._reconnect(delay * botConfig.reconnectRatio, attempt) }
+            else {log.error`failed to reconnect after ${botConfig.reconnectAttempts} attempts`}
         }, delay * 1000)
     }
 }
@@ -585,12 +733,17 @@ class Bot extends Agent {
 const getClock = (context) => {
     let before = new Date();
     context.getClock({}, (e, resp) => {
-        if (e) {log.error(`[bot.js] getClock: ${JSON.stringify(e)}`)}
+        if (e) {log.error(`getClock: ${JSON.stringify(e)}`)}
         else {
             let after = new Date();
-            log.silly(`[bot.js] getClock: request took ${after.getTime()-before.getTime()}ms, diff = ${resp.currentTime - after}`);
+            log.silly(`getClock: request took ${after.getTime()-before.getTime()}ms, diff = ${resp.currentTime - after}`);
         }
     });
 };
+
+// const lelog = (e, r, data) => {
+//     if (e) { log.error(`${arguments.caller} card ${card.id} ${JSON.stringify(e)} ${JSON.stringify(card.content)}`) }
+//     else { log.silly(`sendRichContent successful: ${JSON.stringify(r)}`)}
+// };
 
 module.exports = Bot;

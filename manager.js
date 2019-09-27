@@ -1,13 +1,18 @@
 'use strict';
 
-const Winston = require('winston');
-const log = new Winston.Logger({
-    name: 'bot_manager_log',
-    transports: [new Winston.transports.Console({
-        timestamp: true,
-        colorize: true,
-        level: process.env.loglevel || 'info'
-    })]
+const winston = require('winston');
+const logFormat = winston.format.combine(
+    winston.format.label({ label:'manager.js' }),
+    winston.format.json(),
+    winston.format.timestamp(),
+    winston.format.colorize(),
+    winston.format.printf(info => { return `${info.timestamp} [${info.label}] ${info.level}: ${info.message}` })
+);
+const log = winston.createLogger({
+    format: logFormat,
+    transports: [
+        new winston.transports.Console({ timestamp: true, colorize: true, level: process.env.loglevel || 'debug' })
+    ]
 });
 
 const Bot = require('./bot/bot.js');
@@ -15,7 +20,7 @@ let agent_config = {};
 try {
     agent_config = require('./config/config.js')[process.env.LP_ACCOUNT][process.env.LP_USER];
 } catch (ex) {
-    log.warn(`[manager.js] Error loading config: ${ex}`)
+    log.warn(`Error loading config: ${ex}`)
 }
 
 /**
@@ -30,15 +35,15 @@ try {
 const manager = new Bot(agent_config, 'AWAY', true);
 
 manager.on(Bot.const.CONNECTED, data => {
-    log.info(`[manager.js] CONNECTED ${JSON.stringify(data)}`);
+    log.info(`CONNECTED ${JSON.stringify(data)}`);
 });
 
 manager.on(Bot.const.ROUTING_NOTIFICATION, data => {
-    log.info(`[manager.js] ROUTING_NOTIFICATION ${JSON.stringify(data)}`);
+    log.info(`ROUTING_NOTIFICATION ${JSON.stringify(data)}`);
 });
 
 manager.on(Bot.const.CONVERSATION_NOTIFICATION, event => {
-    log.info(`[manager.js] CONVERSATION_NOTIFICATION ${JSON.stringify(event)}`);
+    log.info(`CONVERSATION_NOTIFICATION ${JSON.stringify(event)}`);
 
     // Iterate through notifications
     event.changes.forEach(change => {
@@ -48,17 +53,17 @@ manager.on(Bot.const.CONVERSATION_NOTIFICATION, event => {
 });
 
 manager.on(Bot.const.AGENT_STATE_NOTIFICATION, event => {
-    log.info(`[manager.js] AGENT_STATE_NOTIFICATION ${JSON.stringify(event)}`);
+    log.info(`AGENT_STATE_NOTIFICATION ${JSON.stringify(event)}`);
 });
 
 manager.on(Bot.const.CONTENT_NOTIFICATION, event => {
-    log.info(`[manager.js] CONTENT_NOTIFICATION ${JSON.stringify(event)}`);
+    log.info(`CONTENT_NOTIFICATION ${JSON.stringify(event)}`);
 });
 
 manager.on(Bot.const.SOCKET_CLOSED, event => {
-    log.info(`[manager.js] SOCKET_CLOSED ${JSON.stringify(event)}`);
+    log.info(`SOCKET_CLOSED ${JSON.stringify(event)}`);
 });
 
 manager.on(Bot.const.ERROR, error => {
-    log.error(`[manager.js] ERROR ${JSON.stringify(error)}`);
+    log.error(`ERROR ${JSON.stringify(error)}`);
 });

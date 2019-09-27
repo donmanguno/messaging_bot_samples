@@ -1,13 +1,18 @@
 'use strict';
 
-const Winston = require('winston');
-const log = new Winston.Logger({
-    name: 'bot_agent_log',
-    transports: [new Winston.transports.Console({
-        timestamp: true,
-        colorize: true,
-        level: process.env.loglevel || 'info'
-    })]
+const winston = require('winston');
+const logFormat = winston.format.combine(
+    winston.format.label({ label:'agent.js' }),
+    winston.format.json(),
+    winston.format.timestamp(),
+    winston.format.colorize(),
+    winston.format.printf(info => { return `${info.timestamp} [${info.label}] ${info.level}: ${info.message}` })
+);
+const log = winston.createLogger({
+    format: logFormat,
+    transports: [
+        new winston.transports.Console({ timestamp: true, colorize: true, level: process.env.loglevel || 'debug' })
+    ]
 });
 
 const Bot = require('./bot/bot.js');
@@ -15,8 +20,13 @@ let agent_config = {};
 try {
     agent_config = require('./config/config.js')[process.env.LP_ACCOUNT][process.env.LP_USER];
 } catch (ex) {
-    log.warn(`[agent.js] Error loading config: ${ex}`)
+    log.warn(`Error loading config: ${ex}`)
 }
+
+// const url = require('url');
+// const Agent = require('https-proxy-agent');
+// const proxy = new Agent(url.parse('208.84.63.81'));
+// Object.assign(agent_config, {agent: proxy});
 
 /**
  * The agent bot starts in the default state ('ONLINE') and subscribes only to its own conversations
@@ -33,47 +43,48 @@ const agent = new Bot(agent_config);
 const transferSkill = '277498214';
 
 agent.on(Bot.const.CONNECTED, data => {
-    log.info(`[agent.js] CONNECTED ${JSON.stringify(data)}`);
+    log.info(`CONNECTED ${JSON.stringify(data)}`);
 });
 
 agent.on(Bot.const.ROUTING_NOTIFICATION, data => {
-    log.info(`[agent.js] ROUTING_NOTIFICATION ${JSON.stringify(data)}`);
+    log.info(`ROUTING_NOTIFICATION ${JSON.stringify(data)}`);
 
     // Accept all waiting conversations
     agent.acceptWaitingConversations(data);
 });
 
 agent.on(Bot.const.CONVERSATION_NOTIFICATION, event => {
-    log.info(`[agent.js] CONVERSATION_NOTIFICATION ${JSON.stringify(event)}`);
+    log.info(`CONVERSATION_NOTIFICATION ${JSON.stringify(event)}`);
 });
 
 agent.on(Bot.const.AGENT_STATE_NOTIFICATION, event => {
-    log.info(`[agent.js] AGENT_STATE_NOTIFICATION ${JSON.stringify(event)}`);
+    log.info(`AGENT_STATE_NOTIFICATION ${JSON.stringify(event)}`);
 });
 
 agent.on(Bot.const.CONTENT_NOTIFICATION, event => {
-    log.info(`[agent.js] CONTENT_NOTIFICATION ${JSON.stringify(event)}`);
+    log.info(`CONTENT_NOTIFICATION ${JSON.stringify(event)}`);
 
-    // Respond to messages from the CONSUMER
+    // If I am the ASSIGNED_AGENT respond to messages from the CONSUMER
     if (event.originatorMetadata.role === 'CONSUMER'
         && agent.getRole(agent.myConversations[event.dialogId].conversationDetails) === 'ASSIGNED_AGENT') {
 
-        switch (event.message.toLowerCase()) {
+        switch (typeof event.message === 'string' ? event.message.toLowerCase() : event.message) {
             case 'transfer':
-                agent.sendText(event.dialogId, 'transferring you to a new skill');
+                agent.sendText(event.dialogId, 'transferring you to a new skill', 'transfer requested');
                 agent.transferConversation(event.dialogId, transferSkill);
                 break;
 
             case 'close':
+                agent.sendText(event.dialogId, 'ok, bye loser', 'close requested');
                 agent.closeConversation(event.dialogId);
                 break;
 
             case 'time':
-                agent.sendText(event.dialogId, (new Date()).toTimeString());
+                agent.sendText(event.dialogId, (new Date()).toTimeString(), 'time requested');
                 break;
 
             case 'date':
-                agent.sendText(event.dialogId, (new Date()).toDateString());
+                agent.sendText(event.dialogId, (new Date()).toDateString(), 'date requested');
                 break;
 
             case 'online':
@@ -139,9 +150,9 @@ agent.on(Bot.const.CONTENT_NOTIFICATION, event => {
 });
 
 agent.on(Bot.const.SOCKET_CLOSED, event => {
-    log.info(`[agent.js] SOCKET_CLOSED ${JSON.stringify(event)}`);
+    log.info(`SOCKET_CLOSED ${JSON.stringify(event)}`);
 });
 
 agent.on(Bot.const.ERROR, error => {
-    log.error(`[agent.js] ERROR ${JSON.stringify(error)}`);
+    log.error(`ERROR ${JSON.stringify(error)}`);
 });

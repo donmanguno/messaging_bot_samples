@@ -10,7 +10,9 @@
   "author": "mmanguno@liveperson.com",
   "license": "ISC",
   "dependencies": {
-    "node-agent-sdk": "^0.2.22",
-    "winston": "^2.4.0"
+    "connector_api": "git+ssh://git@lpgithub.dev.lprnd.net:mmanguno/connector_api.git",
+    "https-proxy-agent": "^2.2.1",
+    "node-agent-sdk": "^0.3.1",
+    "winston": "^3.0.0-rc1"
   }
 }
